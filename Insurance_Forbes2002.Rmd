@@ -36,42 +36,60 @@ library(glmmTMB)
 path = "Conducta"
 ```
 
+```{r}
+# Create a function for censuring 
+source(str_glue("C:/Users/{path}/Dropbox/PHD/Custom functions/Censoring.R"))
+```
+
 # Import data    
 ```{r}
 Mother <- read.csv(str_glue("C:/Users/{path}/Dropbox/PHD/DATA/Csv/RawData4.5.csv")) %>% 
-  mutate(across(c(FECHFINAL1, FECHFINAL2, FECHFINAL3, ECLOSION1, ECLOSION2, ECLOSION3, ESTECLOS1, ESTECLOS2, ESTECLOS3, FECHHUEVO1, FECHHUEVO2, FECHHUEVO3), ymd)) %>% 
+  mutate(across(c(FECHFINAL1, FECHFINAL2, FECHFINAL3, ECLOSION1, ECLOSION2, ECLOSION3, ESTECLOS1, ESTECLOS2, ESTECLOS3, FECHHUEVO1, FECHHUEVO2, FECHHUEVO3), ymd)) %>%
   rename(dmESTPUESTA1_ = dmESTPUESTA1) %>% 
-  rename(Clutch = PUESTA, Brood = NIDADA)
+  rename(Clutch = PUESTA, Brood = NIDADA) %>% 
+  Censoring(., 60) %>% 
+  mutate(FinalDate1 = ESTECLOS1 + Time601) %>% 
+  mutate(FinalDate2 = ESTECLOS2 + Time602) %>% 
+  mutate(FinalDate3 = ESTECLOS3 + Time603)  
+```
+
+# Add climwin windows for this data 
+```{r, include=FALSE}
+ClimData = read.csv(str_glue("C:/Users/{path}/Dropbox/PHD/DATA/Csv/ClimateVariables4.0.csv"), sep = ",", 
+                    header = T,stringsAsFactors = F) %>%
+  rename(Date = time) %>% mutate(Date = ymd(Date)) %>% arrange(Date) %>% 
+  mutate(SST = as.numeric(SST)) %>% 
+  glimpse()
+
+# Don't run if hurry or slow pc
+DATABio_Clim <- Mother %>% arrange(NIDO) %>% 
+  rowwise() %>% 
+  mutate(AlistChl = list(ClimData$Chl[ClimData$Date %within% interval(ESTECLOS1, FinalDate1)])) %>%
+  mutate(AlistSST = list(ClimData$SST[ClimData$Date %within% interval(ESTECLOS1, FinalDate1)])) %>% 
+  mutate(AlistArea_rain = list(ClimData$Area_Rain[ClimData$Date %within% interval(ESTECLOS1, FinalDate1)])) %>%
+  mutate(BlistChl = list(ClimData$Chl[ClimData$Date %within% interval(ESTECLOS2, FinalDate2)])) %>%
+  mutate(BlistSST = list(ClimData$SST[ClimData$Date %within% interval(ESTECLOS2, FinalDate2)])) %>% 
+  mutate(BlistArea_rain = list(ClimData$Area_Rain[ClimData$Date %within% interval(ESTECLOS2, FinalDate2)])) %>%
+  mutate(ClistChl = list(ClimData$Chl[ClimData$Date %within% interval(ESTECLOS3, FinalDate3)])) %>%
+  mutate(ClistSST = list(ClimData$SST[ClimData$Date %within% interval(ESTECLOS3, FinalDate3)])) %>% 
+  mutate(ClistArea_rain = list(ClimData$Area_Rain[ClimData$Date %within% interval(ESTECLOS3, FinalDate3)])) %>% 
+      ungroup() %>% 
+  mutate(
+    AChl = map_dbl(AlistChl, mean, na.rm = T),
+    ASST = map_dbl(AlistSST, mean, na.rm = T),
+    AArea_rain = map_dbl(AlistArea_rain, mean, na.rm = T)) %>% 
+  mutate(
+    BChl = map_dbl(BlistChl, mean, na.rm = T),
+    BSST = map_dbl(BlistSST, mean, na.rm = T),
+    BArea_rain = map_dbl(BlistArea_rain, mean, na.rm = T)) %>% 
+  mutate(
+    CChl = map_dbl(ClistChl, mean, na.rm = T),
+    CSST = map_dbl(ClistSST, mean, na.rm = T),
+    CArea_rain = map_dbl(ClistArea_rain, mean, na.rm = T)) 
+
 ```
 
 # Brood reduction increse survival probabilities specialy in marginal offspring
-```{r}
-# Create a function for censuring 
-Censoring <- function(data, x){
-  usethis::ui_done("function that censure the last age and death")
-  data %>% mutate(Death601 = case_when(MURIO1 == "f" & LastAge1 >= x ~ 0, # Right censoring
-                                          MURIO1 == "t" & LastAge1 < x ~ 1,
-                                          MURIO1 == "t" & LastAge1 >= x ~ 0,
-                                          MURIO1 == "f" & LastAge1 < x ~ NA_real_,
-                                          TRUE ~ NA_real_)) %>%  
-    mutate(Death602 = case_when(MURIO2 == "f" & LastAge2 >= x ~ 0,
-                                   MURIO2 == "t" & LastAge2 < x ~ 1,
-                                   MURIO2 == "t" & LastAge2 >= x ~ 0,
-                                   MURIO2 == "f" & LastAge2 < x ~ NA_real_,
-                                   TRUE ~ NA_real_)) %>% 
-    mutate(Death603 = case_when(MURIO3 == "f" & LastAge3 >= x ~ 0,
-                                   MURIO3 == "t" & LastAge3 < x ~ 1,
-                                   MURIO3 == "t" & LastAge3 >= x ~ 0,
-                                   MURIO3 == "f" & LastAge3 < x ~ NA_real_,
-                                   TRUE ~ NA_real_)) %>% 
-    mutate(Time601 = case_when(Death601 == 0 ~ x,
-                               Death601 == 1 ~ as.numeric(LastAge1))) %>% 
-    mutate(Time602 = case_when(Death602 == 0 ~ x,
-                               Death602 == 1 ~ as.numeric(LastAge2))) %>% 
-    mutate(Time603 = case_when(Death603 == 0 ~ x,
-                               Death603 == 1 ~ as.numeric(LastAge3)))
-}
-```
 
 
 # Create new data for analysis BROODS OF 2
@@ -86,37 +104,36 @@ InsuranceData <-
   filter(!(!is.na(CONLLEGADA) & Eclos_Arrival < 21)) %>% # only use nest where laying date was after first monitoring or at least 3 weeks before arrival
   filter(!(Nest_OrderFemale > 1)) %>% # We could add male renest (n = -64)
   # filter(!(DESTHUEVO2 != "e" & FECHHUEVO2 <= ECLOSION1)) %>% # We need to remove cases when one egg deseapeared before one egg has hatch because we don;t know who is who.
-  Censoring(., 60) %>% # function
-  mutate(LastDate1 = ECLOSION1 + Time601) %>% 
-  mutate(LastDate2 = ECLOSION2 + Time602) %>% 
   filter(!(FECHFINAL1 == FECHFINAL2 & Death601 == 1 & Death602 == 1)) %>% # We don't want chicks that died at the same date
   mutate(Sib_died2 = case_when((Death601 == 1 & FECHFINAL1 < FECHFINAL2) ~ 1, 
                                TRUE ~ 0)) %>% 
   mutate(Sib_died1 = case_when((Death602 == 1 & FECHFINAL2 < FECHFINAL1) ~ 1, 
-                               TRUE ~ 0)) %>% 
-  mutate(AgeatSibDeath1 = as.numeric(FECHFINAL2 - ECLOSION1)) %>% # Age of A when B died 
-  mutate(AgeatSibDeath2 = as.numeric(FECHFINAL1 - ECLOSION2)) # Age of B when A died
+                               TRUE ~ 0)) 
+```
 
+# Edit data
+```{r}
 InsuranceEdit <- InsuranceData %>% 
   rename(LastSibAge2 = LastAge1, LastSibAge1 = LastAge2) %>% 
-  select(c(contains(c("Sib_died", "LastDate")), 
-           # ECLOSION1, ECLOSION2,
+  select(c(contains(c("Sib_died")),
+           ESTECLOS1, ESTECLOS2, 
+           FinalDate1, FinalDate2,
            Time601, Time602,
            Death601, Death602,
            RealMotherAge, CoupleExpLocal, ANILLOHEMB,
            RealFatherAge, ANILLOMACH,
            PROPORTIONALRANK, EstHatchAsynchro12_, NIDO, WORKYEAR)) %>% 
-  mutate(across(contains(c("Sib_died", "LastDate", "Death60", "Time")), as.character)) %>% 
+  mutate(across(contains(c("Sib_died", "Death60", "Time", "ESTECLOS", "FinalDate")), as.character)) %>% 
   pivot_longer(all_of(ends_with(c("1", "2"))), names_to = c("col", "Status"), names_pattern = "(.*)(.)") %>%  
   pivot_wider(names_from = col) %>% # Split chick A and chick B
   mutate(Status = recode(Status, `1` = "ChickA", `2` = "ChickB")) %>% 
-  mutate(LastDate = ymd(LastDate))  
+  mutate(across(c("FinalDate", "ESTECLOS"), ymd)) %>% glimpse 
   
 ```
 
 # Add climwin windows for this data 
 ```{r, include=FALSE}
-
+# Climwin data
 ClimData = read.csv(str_glue("C:/Users/{path}/Dropbox/PHD/DATA/Csv/ClimateVariables4.0.csv"), sep = ",", 
                     header = T,stringsAsFactors = F) %>%
   rename(Date = time) %>% mutate(Date = ymd(Date)) %>% arrange(Date) %>% 
@@ -130,27 +147,60 @@ ClimData = read.csv(str_glue("C:/Users/{path}/Dropbox/PHD/DATA/Csv/ClimateVariab
 # SST = 7.5 to 0 week prior quad max
 # Rain area = 14 to 4 week prior quad min
 
-Window <- data.frame(Chl_open_window = InsuranceEdit %>% 
-                       .$LastDate - 11*7, Chl_close_window = InsuranceEdit %>% 
-                       .$LastDate - 2*7, SST_open_window = InsuranceEdit %>% 
-                       .$LastDate - 8*7, SST_close_window = InsuranceEdit %>% 
-                       .$LastDate, AreaRain_open_window = InsuranceEdit %>% 
-                       .$LastDate - 14*7, AreaRain_close_window = InsuranceEdit %>%
-                       .$LastDate - 4*7) %>% bind_cols(InsuranceEdit) %>% mutate(Week = week(LastDate))
+# Window <- data.frame(Chl_open_window = InsuranceEdit %>% 
+#                        .$LastDate - 11*7, Chl_close_window = InsuranceEdit %>% 
+#                        .$LastDate - 2*7, SST_open_window = InsuranceEdit %>% 
+#                        .$LastDate - 8*7, SST_close_window = InsuranceEdit %>% 
+#                        .$LastDate, AreaRain_open_window = InsuranceEdit %>% 
+#                        .$LastDate - 14*7, AreaRain_close_window = InsuranceEdit %>%
+#                        .$LastDate - 4*7) %>% bind_cols(InsuranceEdit) %>% mutate(Week = week(LastDate))
+# 
+# 
+# DATABio_Clim <- Window %>% arrange(LastDate, NIDO) %>% rowwise() %>% 
+#   mutate(listChl = list(ClimData$min_chl[ClimData$min_date %within% interval(Chl_open_window, Chl_close_window)])) %>% 
+#   mutate(listSST = list(ClimData$max_SST[ClimData$min_date %within% interval(SST_open_window, SST_close_window)])) %>% 
+#   mutate(listArea_rain = list(ClimData$max_areaRain[ClimData$min_date %within% interval(AreaRain_open_window, AreaRain_close_window)])) %>% 
+#       ungroup() %>% 
+#   mutate(
+#     Chl = map_dbl(listChl, mean, na.rm = T),
+#     SST = map_dbl(listSST, mean, na.rm = T),
+#     Area_rain = map_dbl(listArea_rain, mean, na.rm = T),
+#          ) %>%  
+#   select(-contains("list"))
 
+# Climate experiance 
+  # Add climwin windows for this data 
 
-DATABio_Clim <- Window %>% arrange(LastDate, NIDO) %>% rowwise() %>% 
-  mutate(listChl = list(ClimData$min_chl[ClimData$min_date %within% interval(Chl_open_window, Chl_close_window)])) %>% 
-  mutate(listSST = list(ClimData$max_SST[ClimData$min_date %within% interval(SST_open_window, SST_close_window)])) %>% 
-  mutate(listArea_rain = list(ClimData$max_areaRain[ClimData$min_date %within% interval(AreaRain_open_window, AreaRain_close_window)])) %>% 
+ClimData = read.csv(str_glue("C:/Users/{path}/Dropbox/PHD/DATA/Csv/ClimateVariables4.0.csv"), sep = ",", 
+                    header = T,stringsAsFactors = F) %>%
+  rename(Date = time) %>% mutate(Date = ymd(Date)) %>% arrange(Date) %>% 
+  mutate(SST = as.numeric(SST)) %>% 
+  glimpse()
+
+DATABio_Clim <- InsuranceEdit %>% arrange(NIDO) %>% 
+  rowwise() %>% 
+  mutate(AlistChl = list(ClimData$Chl[ClimData$Date %within% interval(ESTECLOS1, FinalDate1)])) %>%
+  mutate(AlistSST = list(ClimData$SST[ClimData$Date %within% interval(ESTECLOS1, FinalDate1)])) %>% 
+  mutate(AlistArea_rain = list(ClimData$Area_Rain[ClimData$Date %within% interval(ESTECLOS1, FinalDate1)])) %>%
+mutate(BlistChl = list(ClimData$Chl[ClimData$Date %within% interval(ESTECLOS2, FinalDate2)])) %>%
+  mutate(BlistSST = list(ClimData$SST[ClimData$Date %within% interval(ESTECLOS2, FinalDate2)])) %>% 
+  mutate(BlistArea_rain = list(ClimData$Area_Rain[ClimData$Date %within% interval(ESTECLOS2, FinalDate2)])) %>%
+mutate(ClistChl = list(ClimData$Chl[ClimData$Date %within% interval(ESTECLOS3, FinalDate3)])) %>%
+  mutate(ClistSST = list(ClimData$SST[ClimData$Date %within% interval(ESTECLOS3, FinalDate3)])) %>% 
+  mutate(ClistArea_rain = list(ClimData$Area_Rain[ClimData$Date %within% interval(ESTECLOS3, FinalDate3)])) %>% 
       ungroup() %>% 
   mutate(
-    Chl = map_dbl(listChl, mean, na.rm = T),
-    SST = map_dbl(listSST, mean, na.rm = T),
-    Area_rain = map_dbl(listArea_rain, mean, na.rm = T),
-         ) %>%  
-  select(-contains("list"))
-  
+    AChl = map_dbl(AlistChl, mean, na.rm = T),
+    ASST = map_dbl(AlistSST, mean, na.rm = T),
+    AArea_rain = map_dbl(AlistArea_rain, mean, na.rm = T)) %>% 
+  mutate(
+    BChl = map_dbl(BlistChl, mean, na.rm = T),
+    BSST = map_dbl(BlistSST, mean, na.rm = T),
+    BArea_rain = map_dbl(BlistArea_rain, mean, na.rm = T)) %>% 
+  mutate(
+    CChl = map_dbl(ClistChl, mean, na.rm = T),
+    CSST = map_dbl(ClistSST, mean, na.rm = T),
+    CArea_rain = map_dbl(ClistArea_rain, mean, na.rm = T)) 
 
 ```
 
@@ -163,8 +213,7 @@ DATABio_Clim <- Window %>% arrange(LastDate, NIDO) %>% rowwise() %>%
 DfInsurance <- InsuranceEdit %>% 
   select(-contains("window"), 
          -CoupleExpLocal,
-         -RealMotherAge,
-         -ANILLOHEMB,
+         -RealMotherAge, -ANILLOHEMB,
          -RealFatherAge, -ANILLOMACH,
          # -Chl,
          # -SST,
@@ -181,25 +230,47 @@ DfInsurance <- InsuranceEdit %>%
   filter(Status == "ChickB") %>% 
   glimpse() # Doesn't make sense to acount sib effect on chick who allrealy survived
   #filter(Sib_died == "1") # if we want to study how age at sib death affect survival
-```
 
+n_B_Brood_2 <- count(DfInsurance) %>% pull
+```
+## Add climatique data to chicks B data 
+```{r}
+DATABio_Clim <- DfInsurance %>% arrange(NIDO) %>% 
+  rowwise() %>% 
+  mutate(listChl = list(ClimData$Chl[ClimData$Date %within% interval(ESTECLOS, FinalDate)])) %>%
+  mutate(listSST = list(ClimData$SST[ClimData$Date %within% interval(ESTECLOS, FinalDate)])) %>% 
+  mutate(listArea_rain = list(ClimData$Area_Rain[ClimData$Date %within% interval(ESTECLOS, FinalDate)])) %>%
+      ungroup() %>% 
+  mutate(
+    Chl = map_dbl(listChl, mean, na.rm = T),
+    SST = map_dbl(listSST, mean, na.rm = T),
+    Area_rain = map_dbl(listArea_rain, mean, na.rm = T)) %>% 
+  drop_na(c(Chl, SST, Area_rain)) %>% 
+  mutate(across(c(Chl, SST, Area_rain),  arm::rescale))
+
+DATABio_Clim %>% count(Sib_died)
+```
+Climatic variables in this analysis aren't that useful because there is no clear hypothesis behind it. For example if we thinks that parents abandon clutch when after the death of chick A death only if resources are low then is rare that if resources where rare that B chick didn't died before A. Reducing the sample size remove sib_death effect because that effect wasn't that strong and sample size is quite small now.
 
 ```{r eval=FALSE}
+DATABio_Clim %<>% mutate(Sib_died = fct_relevel(Sib_died, "0", after = 1L))
+levels(DATABio_Clim$Sib_died)
+
 BestTMB = glmmTMB(
   Death60 ~  Sib_died + 
     PROPORTIONALRANK +
     # Sib_died : PROPORTIONALRANK +
     EstHatchAsynchro12_ +
     # CoupleExpLocal + # No sign effect
-    # RealMotherAge +  # sign effect for A
-    # I(RealMotherAge^2) +  # sign effect for A
+    # RealMotherAge +  # no sign effect for B
+    # I(RealMotherAge^2) +  # no sign effect for B
     # RealFatherAge +  # No sign effect
     # I(RealFatherAge^2) +  # No sign effect
     # as.numeric(WORKYEAR) +
     # Chl +
     # I(Chl^2) +
     # SST +
-    # SST : Sib_died +
+    # Sib_died : SST +
     # I(SST^2) +
     # Area_rain +
     # I(Area_rain^2) +
@@ -265,24 +336,26 @@ write.csv(FinalBCoef, "C:/Users/Conducta/Dropbox/PHD/Git/Sibling_Insurance/CoefI
 # Analysis Chick A
 
 ```{r}
-DfInsurance <- DATABio_Clim %>% 
-  select(-contains("window"), 
+DfInsurance <- InsuranceEdit %>% 
+  select(#-contains("window"),
          -CoupleExpLocal,
          # -RealMotherAge, -ANILLOHEMB,
          -RealFatherAge, -ANILLOMACH,
-         -Chl,
-         -SST,
-         -Area_rain,
-         -Week) %>% 
+         # -Chl,
+         # -SST,
+         # -Area_rain,
+         # -Week
+  ) %>% 
   drop_na() %>% 
   mutate(across(c(where(is.character), WORKYEAR, Sib_died), as.factor)) %>%
-  mutate(across(c(AgeatSibDeath, LastSibAge, Death60), as.character)) %>% 
-  mutate(across(c(AgeatSibDeath, LastSibAge, Death60, Time60), as.numeric)) %>%
-  mutate(across(c(where(is.numeric), -Death60, -AgeatSibDeath, -LastSibAge, -Time60), arm::rescale)) %>% 
+  mutate(across(c(Death60), as.character)) %>% 
+  mutate(across(c(Death60, Time60), as.numeric)) %>%
+  mutate(across(c(where(is.numeric), -Death60, -Time60), arm::rescale)) %>% 
   filter(Status == "ChickA") %>% 
   # filter((Sib_died == 1 & LastSibAge < 50) | Sib_died == 0) %>% 
   glimpse() # Doesn't make sense to acount sib effect on chick who allrealy survived
   #filter(Sib_died == "1") # if we want to study how age at sib death affect survival
+n_A_Brood_2 <- count(DfInsurance) %>% pull
 ```
 
 
@@ -290,7 +363,7 @@ DfInsurance <- DATABio_Clim %>%
 BestTMB = glmmTMB(
   Death60 ~  Sib_died + 
     PROPORTIONALRANK +
-    Sib_died : PROPORTIONALRANK +
+    # Sib_died : PROPORTIONALRANK +
     EstHatchAsynchro12_ +
     # CoupleExpLocal + # No sign effect
     RealMotherAge +  # sign effect for A
@@ -305,7 +378,7 @@ BestTMB = glmmTMB(
     # I(SST^2) +
     # Area_rain +
     # I(Area_rain^2) +
-    (1|WORKYEAR) + (1|ANILLOHEMB), 
+    (1|WORKYEAR), #+ (1|ANILLOHEMB), 
   family = binomial(link = "logit"),
   REML = FALSE,
   ziformula = ~ 0,
@@ -388,72 +461,71 @@ InsuranceData3 <-
   filter(DESTHUEVO3 == "e") %>% 
   filter(!(Nest_OrderFemale > 1)) %>% # We could add male renest (n = -64)
   # filter(!(DESTHUEVO2 != "e" & FECHHUEVO2 <= ECLOSION1)) %>% # We need to remove cases when one egg deseapeared before one egg has hatch because we don;t know who is who.
-  Censoring(., 60) %>% # function
-  mutate(LastDate1 = ECLOSION1 + Time601) %>% 
-  mutate(LastDate2 = ECLOSION2 + Time602) %>% 
-  mutate(LastDate3 = ECLOSION3 + Time603) %>% 
   filter(!((FECHFINAL1 == FECHFINAL3 & Death601 == 1 & Death603 == 1) | FECHFINAL2 == FECHFINAL3 & Death602 == 1 & Death603 == 1)) %>% 
-  mutate(Sib_died1 = case_when((Death602 == 1 & FECHFINAL2 < FECHFINAL1) ~ 1, 
+  mutate(Sib_died1 = case_when((Death602 == 1 & FECHFINAL2 < FECHFINAL1) | (Death603 == 1 & FECHFINAL3 < FECHFINAL1) ~ 1, 
                                TRUE ~ 0)) %>% 
-  mutate(Sib_died2 = case_when((Death601 == 1 & FECHFINAL1 < FECHFINAL2) ~ 1, 
+  mutate(ASib_died2 = case_when((Death601 == 1 & FECHFINAL1 < FECHFINAL2) ~ 1, 
+                               TRUE ~ 0)) %>% 
+  mutate(CSib_died2 = case_when((Death603 == 1 & FECHFINAL3 < FECHFINAL2) ~ 1, 
                                TRUE ~ 0)) %>% 
   mutate(Sib_died3 = case_when((Death601 == 1 & FECHFINAL1 < FECHFINAL3) | (Death602 == 1 & FECHFINAL2 < FECHFINAL3) ~ 1, 
+                               TRUE ~ 0)) %>% 
+  mutate(ASib_died3 = case_when((Death601 == 1 & FECHFINAL1 < FECHFINAL3) ~ 1, 
+                               TRUE ~ 0)) %>% 
+  mutate(BSib_died3 = case_when((Death602 == 1 & FECHFINAL2 < FECHFINAL3) ~ 1, 
                                TRUE ~ 0))
   
-InsuranceData3 %>% count(Sib_died2)
+InsuranceData3 %>% count(Sib_died3)
+```
 
+## Edit data Brood of 3
+```{r}
 InsuranceEdit3 <- InsuranceData3 %>% 
-  rename(LastSibAge2 = LastAge1, LastSibAge1 = LastAge2) %>% 
-  select(c(contains(c("Sib_died", "FECHFINAL", "Death60", "Time60", "LastDate")), 
+  select(c(contains(c("Sib_died", "FECHFINAL", "Death60", "Time60", "EstHatchAsynchro")), 
            # ECLOSION1, ECLOSION2, ECLOSION3,
-           PROPORTIONALRANK, EstHatchAsynchro23_, NIDO, WORKYEAR)) %>% 
-  mutate(across(contains(c("Sib_died", "LastDate", "Death60", "Time", "FECHFINAL")), as.character)) %>% 
+           ANILLOHEMB, RealMotherAge,
+           PROPORTIONALRANK, NIDO, WORKYEAR)) %>% 
+  mutate(across(contains(c("Sib_died", "Death60", "Time", "FECHFINAL")), as.character)) %>% 
   pivot_longer(all_of(ends_with(c("1", "2", "3"))), names_to = c("col", "Status"), names_pattern = "(.*)(.)") %>%  
-  pivot_wider(names_from = col) %>% # Split chick A and chick B
-  mutate(Status = recode(Status, `1` = "ChickA", `2` = "ChickB", `3` = "ChickC")) %>% 
-  mutate(LastDate = ymd(LastDate))  
+  pivot_wider(names_from = col) %>% # Split chick A, chick B, C
+  mutate(Status = recode(Status, `1` = "ChickA", `2` = "ChickB", `3` = "ChickC")) 
   
   
 InsuranceEdit3
   
 ```
 
-# Analysis Chick B
+# Analysis Chick C
 
 ```{r}
 DfInsurance <- InsuranceEdit3 %>% 
-  select(-contains("window"), 
-         # -CoupleExpLocal,
-         # -RealMotherAge,
-         # -ANILLOHEMB,
-         # -RealFatherAge, -ANILLOMACH,
-         # -Chl,
-         # -SST,
-         # -Area_rain,
-         # -Week
-         ) %>% 
   # filter(!ANILLOHEMB == "SA") %>%
-  drop_na() %>% 
   mutate(across(c(where(is.character), WORKYEAR, Sib_died), as.factor)) %>%
   mutate(across(c(Death60), as.character)) %>% 
   mutate(across(c(Death60, Time60), as.numeric)) %>%
   mutate(across(c(where(is.numeric), -Death60, -Time60), arm::rescale)) %>% 
   # filter((Sib_died == 1 & LastSibAge < 15) | Sib_died == 0) %>% 
   filter(Status == "ChickC") %>% 
+  select(Sib_died, Death60, EstHatchAsynchro23_, PROPORTIONALRANK, WORKYEAR,
+         ASib_died, BSib_died, # Correct?
+         RealMotherAge, ANILLOHEMB) %>% 
+  drop_na() %>% 
   glimpse() # Doesn't make sense to acount sib effect on chick who allrealy survived
   #filter(Sib_died == "1") # if we want to study how age at sib death affect survival
+
+n_C_Brood_3 <- count(DfInsurance) %>% pull
 ```
 
 
 ```{r eval=FALSE}
 BestTMB = glmmTMB(
-  Death60 ~  Sib_died + 
+  Death60 ~  #Sib_died + 
+    ASib_died + BSib_died + # No sign effect
     PROPORTIONALRANK +
-    Sib_died +
     EstHatchAsynchro23_ +
     # CoupleExpLocal + # No sign effect
-    # RealMotherAge +  # sign effect for A
-    # I(RealMotherAge^2) +  # sign effect for A
+    RealMotherAge +  # sign effect for C
+    I(RealMotherAge^2) +  # sign effect for C
     # RealFatherAge +  # No sign effect
     # I(RealFatherAge^2) +  # No sign effect
     # as.numeric(WORKYEAR) +
@@ -464,7 +536,7 @@ BestTMB = glmmTMB(
     # I(SST^2) +
     # Area_rain +
     # I(Area_rain^2) +
-    (1|WORKYEAR), #+ (1|ANILLOHEMB), 
+    (1|WORKYEAR) + (1|ANILLOHEMB), 
   family = binomial(link = "logit"),
   data = DfInsurance
 )
@@ -523,27 +595,24 @@ FinalBCoef <- bind_rows(FixCoef, RanCoef) %>% rownames_to_column("Terms")
 FinalBCoef[5, "Terms"] = "Year"
 write.csv(FinalBCoef, "C:/Users/Conducta/Dropbox/PHD/Git/Sibling_Insurance/CoefInsB")
 ```
-# Analysis Chick A
+# Analysis Chick A from broods of 3
 
 ```{r}
-DfInsurance <- DATABio_Clim %>% 
-  select(-contains("window"), 
-         -CoupleExpLocal,
-         # -RealMotherAge, -ANILLOHEMB,
-         -RealFatherAge, -ANILLOMACH,
-         -Chl,
-         -SST,
-         -Area_rain,
-         -Week) %>% 
-  drop_na() %>% 
+DfInsurance <- InsuranceEdit3 %>% 
   mutate(across(c(where(is.character), WORKYEAR, Sib_died), as.factor)) %>%
-  mutate(across(c(AgeatSibDeath, LastSibAge, Death60), as.character)) %>% 
-  mutate(across(c(AgeatSibDeath, LastSibAge, Death60, Time60), as.numeric)) %>%
-  mutate(across(c(where(is.numeric), -Death60, -AgeatSibDeath, -LastSibAge, -Time60), arm::rescale)) %>% 
+  mutate(across(c(Death60), as.character)) %>% 
+  mutate(across(c(Death60, Time60), as.numeric)) %>%
+  mutate(across(c(where(is.numeric), -Death60, -Time60), arm::rescale)) %>% 
   filter(Status == "ChickA") %>% 
+  select(PROPORTIONALRANK, EstHatchAsynchro12_, Sib_died, Death60, Status, WORKYEAR,
+         RealMotherAge, ANILLOHEMB) %>% 
+  drop_na() %>% 
   # filter((Sib_died == 1 & LastSibAge < 50) | Sib_died == 0) %>% 
   glimpse() # Doesn't make sense to acount sib effect on chick who allrealy survived
   #filter(Sib_died == "1") # if we want to study how age at sib death affect survival
+
+DfInsurance %>% count(Sib_died)
+n_A_Brood_3 <- count(DfInsurance) %>% pull
 ```
 
 
@@ -551,7 +620,7 @@ DfInsurance <- DATABio_Clim %>%
 BestTMB = glmmTMB(
   Death60 ~  Sib_died + 
     PROPORTIONALRANK +
-    Sib_died : PROPORTIONALRANK +
+    # Sib_died : PROPORTIONALRANK +
     EstHatchAsynchro12_ +
     # CoupleExpLocal + # No sign effect
     RealMotherAge +  # sign effect for A
@@ -566,7 +635,7 @@ BestTMB = glmmTMB(
     # I(SST^2) +
     # Area_rain +
     # I(Area_rain^2) +
-    (1|WORKYEAR) + (1|ANILLOHEMB), 
+    (1|WORKYEAR),# + (1|ANILLOHEMB), 
   family = binomial(link = "logit"),
   REML = FALSE,
   ziformula = ~ 0,
@@ -637,4 +706,67 @@ testZeroInflation(res)
 ```
 
 
+# Analysis Chick B from broods of 3
 
+```{r}
+DfInsurance <- InsuranceEdit3 %>% 
+  mutate(across(c(where(is.character), WORKYEAR, Sib_died), as.factor)) %>%
+  mutate(across(c(Death60), as.character)) %>% 
+  mutate(across(c(Death60, Time60), as.numeric)) %>%
+  mutate(across(c(where(is.numeric), -Death60, -Time60), arm::rescale)) %>% 
+  filter(Status == "ChickB") %>% 
+  select(PROPORTIONALRANK, EstHatchAsynchro12_, ASib_died, CSib_died, Death60, Status, WORKYEAR,
+         RealMotherAge, ANILLOHEMB) %>% 
+  drop_na() %>% 
+  # filter((Sib_died == 1 & LastSibAge < 50) | Sib_died == 0) %>% 
+  glimpse() # Doesn't make sense to acount sib effect on chick who allrealy survived
+  #filter(Sib_died == "1") # if we want to study how age at sib death affect survival
+
+DfInsurance %>% count(Sib_died)
+n_B_Brood_3 <- count(DfInsurance) %>% pull
+```
+
+
+```{r eval=FALSE}
+BestTMB = glmmTMB(
+  Death60 ~  OldSib_died + YoungSib_died +
+    # OldSib_died : YoungSib_died + # No sign effect
+    PROPORTIONALRANK +
+    # Sib_died : PROPORTIONALRANK +
+    EstHatchAsynchro12_ +
+    # CoupleExpLocal + # No sign effect
+    RealMotherAge +  # sign effect for A
+    I(RealMotherAge^2) +  # sign effect for A
+    # RealFatherAge +  # No sign effect
+    # I(RealFatherAge^2) +  # No sign effect
+    # as.numeric(WORKYEAR) +
+    # Chl +
+    # I(Chl^2) +
+    # SST +
+    # SST : Sib_died +
+    # I(SST^2) +
+    # Area_rain +
+    # I(Area_rain^2) +
+    (1|WORKYEAR),# + (1|ANILLOHEMB), 
+  family = binomial(link = "logit"),
+  REML = FALSE,
+  ziformula = ~ 0,
+  data = DfInsurance
+)
+
+performance::check_collinearity(BestTMB)
+Summary <- summary(BestTMB); Summary
+DfInsurance %>% count(Sib_died)
+
+bbmle::AICtab(BestNullA, BestTMB)
+anova(BestTMB, BestNullA)
+```
+
+### Sample size data frame 
+```{r}
+Sample_size <- data.frame(
+  Analysis = c("n_A_Brood_2", "n_B_Brood_2", "n_A_Brood_3", "n_B_Brood_3", "n_C_Brood_3"),
+  Sample_size = c(n_A_Brood_2, n_B_Brood_2, n_A_Brood_3, n_B_Brood_3, n_C_Brood_3)) %>% 
+  mutate(Brood = str_sub(Analysis, -1))
+write_csv(Sample_size, "SampleSize.csv")
+```
