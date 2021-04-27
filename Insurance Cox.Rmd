@@ -1,0 +1,466 @@
+---
+title: "Insurance_Cox_2"
+author: "Ivan Bizberg"
+date: "12/4/2021"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+```
+
+# Prepare environement
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+
+library(performance)
+library(DHARMa)
+library(effects)
+library(Greg)
+
+library(lme4)
+library(coxme)
+library(survminer)
+library(survival)
+library(ordinal)
+library(glmmTMB)
+
+path = "Conducta"
+
+source(str_glue("C:/Users/{path}/Dropbox/PHD/Custom functions/Censoring.R"))
+```
+
+
+
+# Import environemental conditions to survival data
+```{r eval=FALSE}
+# Add climwin windows for this data 
+
+ClimData = read.csv(str_glue("C:/Users/{path}/Dropbox/PHD/DATA/Csv/ClimateVariables4.0.csv"), sep = ",", 
+                    header = T,stringsAsFactors = F) %>%
+  rename(Date = time) %>% mutate(Date = ymd(Date)) %>% arrange(Date) %>% 
+  mutate(SST = as.numeric(SST)) %>% 
+  glimpse()
+
+# Data impute missing climatic data 
+Clim_imput = ClimData %>% arrange(Date) %>% select(Date , SST, Chl, Area_Rain) %>%
+  recipe(~ .) %>% 
+  step_rollimpute(all_of(c("SST", "Chl", "Area_Rain")), window = 15, statistic = mean) %>%
+  prep() %>% bake(., new_data = NULL)
+
+# Check imputation
+colSums(is.na(Clim_imput))
+```
+
+# Import data    
+```{r eval=TRUE}
+Mother <- read.csv(str_glue("C:/Users/{path}/Dropbox/PHD/DATA/Csv/RawData4.5.csv")) %>% 
+  mutate(across(c(FECHFINAL1, FECHFINAL2, FECHFINAL3, ECLOSION1, ECLOSION2, ECLOSION3, ESTECLOS1, ESTECLOS2, ESTECLOS3, FECHHUEVO1, FECHHUEVO2, FECHHUEVO3, PUESTA1), ymd)) %>%
+  rename(dmESTPUESTA1_ = dmESTPUESTA1) %>% 
+  rename(Clutch = PUESTA, Brood = NIDADA) %>% 
+  Censoring(., 60) %>% 
+  mutate(FinalDate1 = ESTECLOS1 + Time601) %>% 
+  mutate(FinalDate2 = ESTECLOS2 + Time602) %>% 
+  mutate(FinalDate3 = ESTECLOS3 + Time603) 
+
+
+# Remove nest established before arrival 
+Mother_inc <- Mother %>% filter(!(!is.na(CONLLEGADA) & Arrival_date > ESTECLOS1)) # Remove nest where chicks hatched before nest monitoring because we don't know the brood size.
+```
+
+# Create new data for analysis BROODS OF 2
+```{r eval=TRUE}
+# Clean data
+InsuranceData <-
+  Mother_inc %>% 
+  filter(!SEMANIPULO == "t") %>% 
+  filter(Clutch == 2, Brood == 2) %>% 
+  filter(!((!is.na(ECLOSION1) & !is.na(ECLOSION2)) & ECLOSION2 < ECLOSION1)) %>% # Remove chick B that hatched before chicks A (Probably an error at determining rank) (n = 195)
+  filter(!((!is.na(ECLOSION1) & !is.na(FECHFINAL1)) & ECLOSION1 > FECHFINAL1)) %>% # Remove typo error (n = 2)
+  filter(!((!is.na(ECLOSION2) & !is.na(FECHFINAL2)) & ECLOSION2 > FECHFINAL2)) %>%  # Remove typo error (n = 3)
+  filter(!(Nest_OrderFemale > 1)) %>% # We could add male renest (n = -64)
+  filter(!(FECHFINAL1 == FECHFINAL2 & Death601 == 1 & Death602 == 1)) %>% # We don't want chicks that died at the same date Sib_died==NA not 0
+  mutate(Sib_died2 = case_when((Death601 == 1 & FECHFINAL1 < FinalDate2) ~ 1, 
+                               TRUE ~ 0)) %>% 
+  mutate(Sib_died1 = case_when((Death602 == 1 & FECHFINAL2 < FinalDate1) ~ 1, 
+                               TRUE ~ 0)) %>% 
+  mutate(SibFechFinal2 = FECHFINAL1) %>% 
+  mutate(SibFechFinal1 = FECHFINAL2) 
+
+# Edit data
+InsuranceEdit <- InsuranceData %>% 
+  rename(LastSibAge2 = LastAge1, LastSibAge1 = LastAge2) %>% 
+  select(c(contains(c("Sib_died", "SibFechFinal")),
+           ESTECLOS1, ESTECLOS2, 
+           FinalDate1, FinalDate2,
+           Time601, Time602,
+           Death601, Death602,
+           CoupleExpLocal,
+           RealMotherAge, ANILLOHEMB, CONFIRMHEMB,
+           RealFatherAge, ANILLOMACH, CONFIRMMACH,
+           PROPORTIONALRANK, EstHatchAsynchro12_, NIDO, WORKYEAR)) %>% 
+  mutate(across(contains(c("Sib_died", "Death60", "Time", "ESTECLOS", "FinalDate", "SibFechFinal")), as.character)) %>% 
+  pivot_longer(all_of(ends_with(c("1", "2"))), names_to = c("col", "Status"), names_pattern = "(.*)(.)") %>%  
+  pivot_wider(names_from = col) %>% # Split chick A and chick B
+  mutate(Status = recode(Status, `1` = "ChickA", `2` = "ChickB")) %>% 
+  mutate(across(c("Time60"), as.numeric)) %>% 
+  drop_na(Death60)
+
+# write.csv(InsuranceEdit, "InsuranceEdit_2.csv")  
+```
+
+
+## Create data for survival analisis counting form
+```{r eval=FALSE}
+DataCountingProcess = InsuranceEdit %>% 
+  mutate(across(c(everything(), -Time60), as.character)) %>% # Step needed for greg package
+  timeSplitter(by = 3, 
+               event_var = "Death60",
+               time_var = "Time60") %>% 
+  mutate(Death = factor(Death60,
+                        levels = 0:1,
+                        labels = c("Alive", "Death"))) %>%
+  mutate(across(c(Death60), as.character)) %>% 
+  mutate(across(c(PROPORTIONALRANK, Death60), as.numeric)) %>% 
+  mutate(across(c(ESTECLOS, FinalDate), ymd)) %>% 
+  mutate(Date_Start_time = ESTECLOS + Start_time, Date_Stop_time = ESTECLOS + (Stop_time - 1)) %>% glimpse()
+
+# Add climdata to counting data
+ClimCount <- DataCountingProcess %>% 
+  rowwise() %>% 
+  mutate(listChl = list(ClimData$Chl[ClimData$Date %within% interval(Date_Start_time, Date_Stop_time)])) %>%
+  mutate(listSST = list(ClimData$SST[ClimData$Date %within% interval(Date_Start_time, Date_Stop_time)])) %>% 
+  mutate(listArea_rain = list(ClimData$Area_Rain[ClimData$Date %within% interval(Date_Start_time, Date_Stop_time)])) %>% 
+      ungroup() %>% 
+  mutate(
+    Chl = map_dbl(listChl, mean, na.rm = T),
+    SST = map_dbl(listSST, mean, na.rm = T),
+    Area_rain = map_dbl(listArea_rain, mean, na.rm = T))
+
+ClimDATACount <- ClimCount %>% select(-contains("list"))
+write_csv(ClimDATACount, "DATAclimraw_ins_2.csv")
+```
+
+
+# Prepare data for analysis A 
+```{r}
+# mutate sib death into counting form
+DATA <- read.csv("DATAclimraw_ins_2.csv") %>% # DATA_ins_2_rmChl.csv if we don't want chl, DATA_ins_2.csv
+  mutate(across(c(Date_Start_time, Date_Stop_time, SibFechFinal), ymd)) %>% 
+  mutate(Sib_died_count = case_when(((Sib_died == 1) & (Date_Start_time < SibFechFinal)) ~ 0,
+                                    TRUE ~ as.numeric(Sib_died)), .after = "Sib_died") 
+DATA %>% glimpse()
+
+# Fix some remaining na that cause problems to cox model 
+Nests <- read.csv("InsuranceEdit_2.csv") %>% filter(Status == "ChickA") %>% select(NIDO, Sib_died) %>% mutate(Sib_died = as.numeric(Sib_died))
+CountNests <- DATA %>% filter(Status == "ChickA") %>% 
+  drop_na(SST) %>% 
+  # drop_na(Chl) %>% # remove if analysis without chl
+  select(NIDO, Sib_died_count) %>% 
+  group_by(NIDO) %>% 
+  summarise(Sib_diedmax = max(Sib_died_count, na.rm = T))
+
+Nest_rm_sibdeath <- left_join(Nests, CountNests, by = "NIDO") %>% filter(Sib_diedmax != Sib_died) %>% .$NIDO 
+Nest_rm_death <- DATA %>% filter(Status == "ChickA") %>% filter(Death60 == 1 & is.na(SST)) %>% .$NIDO 
+
+DATA_naomit <- DATA %>% filter(!NIDO %in% Nest_rm_sibdeath) %>% 
+  filter(!NIDO %in% Nest_rm_death) %>% 
+  glimpse()
+
+
+SampleSize <- DATA_naomit %>% count(NIDO, Sib_died, Death60) %>% count(Death60, Sib_died); SampleSize
+write_csv(SampleSize, "SampleSize_2.csv")
+
+# write_csv(DATA_naomit, "DATA_ins_2_naomit.csv")
+# write_csv(DATA_naomit, "DATA_ins_2_naomit_rmChl.csv")
+
+```
+
+# Select model covariates
+```{r}
+# Final data
+DATA_Cox <- read.csv("DATA_ins_2_naomit_rmChl.csv") # DATA_ins_2_naomit_rmChl.csv
+
+Insurance_Analysis <- DATA_Cox %>% 
+  filter(Status == "ChickA") %>% 
+  mutate(across(c(CoupleExpLocal, RealMotherAge, RealFatherAge, EstHatchAsynchro12_), as.numeric)) %>%
+  mutate(across(c(WORKYEAR, Sib_died, Sib_died_count), as.character)) %>% 
+  mutate(across(c(where(is.numeric), -Death60, -Start_time, -Stop_time), arm::rescale)) %>% 
+  select(Start_time, Stop_time, Death60, Sib_died_count, PROPORTIONALRANK, SST, Area_rain,
+         EstHatchAsynchro12_,
+         # RealMotherAge, ANILLOHEMB, CONFIRMHEMB,
+         # RealFatherAge, ANILLOMACH, CONFIRMMACH,
+         # CoupleExpLocal,
+         # Chl
+         NIDO, WORKYEAR, Status) %>% 
+  # filter(CONFIRMHEMB == "t", !ANILLOHEMB == "SA") %>%
+  # filter(CONFIRMMACH == "t", !ANILLOMACH == "SA") %>%
+  drop_na() %>% 
+  glimpse()
+
+SampleSize <- Insurance_Analysis %>% count(NIDO, Sib_died, Death60) %>% count(Death60, Sib_died); SampleSize
+n_Brood_2A <- Insurance_Analysis %>% count(NIDO) %>% count()%>% pull
+n_Brood_2A_rmPArents <- Insurance_Analysis %>% count(NIDO) %>% count()%>% pull
+```
+## CoxModel 
+```{r eval=TRUE}
+# Insurance_Analysis %<>% mutate(Sib_died = fct_relevel(Sib_died, "0", after = 3L))
+levels(Insurance_Analysis$Sib_died)
+
+Cox <- coxme(Surv(Start_time, Stop_time, Death60) ~ Sib_died_count +
+               PROPORTIONALRANK + EstHatchAsynchro12_ +
+               Sib_died_count : PROPORTIONALRANK +
+               Sib_died_count : SST + # No Sign
+               SST + 
+               I(SST^2) +
+               Area_rain +
+               I(Area_rain^2) +
+               # RealFatherAge +
+               # I(RealFatherAge^2) +
+               # CoupleExpLocal +
+               (1|WORKYEAR) + (1|NIDO),
+             data = Insurance_Analysis)
+
+summary(Cox)
+
+
+saveRDS(Cox, file = "FinalIns_Cox_A2_rmChl.rds")
+```
+## Cox Diagnostic
+
+# Run Cox Diagnostic
+```{r eval=FALSE}
+
+Cox <- coxph(Surv(Start_time, Stop_time, Death60) ~ Sib_died +
+               PROPORTIONALRANK +
+               # Sib_died : Chl + # No Sign
+               # Sib_died : SST + 
+               Chl +
+               I(Chl^2) +
+               SST + 
+               I(SST^2) +
+               Area_rain +
+               I(Area_rain^2) +
+               # RealMotherAge +
+               # I(RealMotherAge^2) +
+               # CoupleExpLocal +
+               (1|WORKYEAR) + (1|NIDO),
+             data = Insurance_Analysis)
+
+# check_collinearity(Coxme)
+rms::vif(Coxph)
+
+zph <- cox.zph(Coxph) ; zph
+ggcoxzph(zph)
+
+aa_fit <-aareg(Surv(Start_time, Stop_time, Death601) ~ SibPresence +
+               PROPORTIONALRANK +
+               # SibPresence : Chl + # No Sign
+               SibPresence : SST +
+               Chl +
+               I(Chl^2) +
+               SST + 
+               I(SST^2) +
+               Area_rain +
+               I(Area_rain^2) + 
+               # RealMotherAge +
+               # I(RealMotherAge^2) +
+               # CoupleExpLocal +
+               frailty(NIDO),
+             data = ClimCount_naomit)
+
+# autoplot(aa_fit)
+
+
+# Final Checking influential observations
+
+# type = "dfbeta" , type = "deviance"
+
+
+ggcoxdiagnostics(Cox, type = "dfbeta",
+                 linear.predictions = FALSE, ggtheme = theme_bw()) # Looks good 
+
+ggcoxdiagnostics(Cox, type = "deviance",
+                 linear.predictions = FALSE, ggtheme = theme_bw()) # We see more negative values correspond to individual that "lived too long". Only problem with diagnostic
+
+# Identify outliers
+library(coxrobust)
+res_mart = resid(Cox,type="martingale") %>% stack()# martingale or deviance
+res_mart %>% #dplyr::slice_max(values, n = 100) %>%
+  ggplot(aes(ind, values)) + geom_point()
+
+# Final Checking non linearity
+
+ggcoxfunctional(Surv(Start_time, Stop_time, Death601) ~ SibPresence +
+               PROPORTIONALRANK +
+               # SibPresence : Chl + # No Sign
+               # SibPresence : SST +
+               Chl +
+               I(Chl^2) +
+               SST + 
+               I(SST^2) +
+               Area_rain +
+               I(Area_rain^2) + 
+               # RealMotherAge +
+               # I(RealMotherAge^2) +
+               # CoupleExpLocal +
+               frailty(NIDO),
+             data = ClimCount_naomit)
+  
+  
+  
+```
+
+# Prepare data for analysis B
+```{r}
+# mutate sib death into counting form
+DATA <- read.csv("DATA_ins_2_naomit_rmChl.csv") %>% # DATA_ins_2_rmChl.csv if we don't want chl, DATA_ins_2.csv
+  mutate(across(c(Date_Start_time, Date_Stop_time, SibFechFinal), ymd)) %>% 
+  mutate(Sib_died_count = case_when(((Sib_died == 1) & (Date_Start_time < SibFechFinal)) ~ 0,
+                                    TRUE ~ as.numeric(Sib_died)), .after = "Sib_died") 
+DATA %>% glimpse()
+
+# Fix some remaining na that cause problems to cox model 
+Nests <- read.csv("InsuranceEdit_2.csv") %>% filter(Status == "ChickB") %>% select(NIDO, Sib_died) %>% mutate(Sib_died = as.numeric(Sib_died))
+CountNests <- DATA %>% filter(Status == "ChickB") %>% 
+  drop_na(SST) %>% 
+  # drop_na(Chl) %>% # comment out if analysis without chl
+  select(NIDO, Sib_died_count) %>% 
+  group_by(NIDO) %>% 
+  summarise(Sib_diedmax = max(Sib_died_count, na.rm = T))
+
+Nest_rm_sibdeath <- left_join(Nests, CountNests, by = "NIDO") %>% filter(Sib_diedmax != Sib_died) %>% .$NIDO 
+Nest_rm_death <- DATA %>% filter(Status == "ChickB") %>% filter(Death60 == 1 & is.na(SST)) %>% .$NIDO 
+
+DATA_naomit <- DATA %>% filter(!NIDO %in% Nest_rm_sibdeath) %>% 
+  filter(!NIDO %in% Nest_rm_death) %>% 
+  glimpse()
+
+
+SampleSize <- DATA_naomit %>% count(NIDO, Sib_died, Death60) %>% count(Death60, Sib_died); SampleSize
+# write_csv(DATA_naomit, "DATA_ins_2_naomit_rmChl_B.csv")
+```
+
+# Select model covariates B
+```{r}
+# Final data
+DATA_Cox <- read.csv("DATA_ins_2_naomit_rmChl_B.csv") # DATA_ins_2_naomit_rmChl.csv
+
+
+Insurance_Analysis <- DATA_Cox %>% 
+  filter(Status == "ChickB") %>% 
+  mutate(across(c(CoupleExpLocal, RealMotherAge, RealFatherAge, EstHatchAsynchro12_), as.numeric)) %>%
+  mutate(across(c(WORKYEAR, Sib_died, Sib_died_count), as.character)) %>% 
+  mutate(across(c(where(is.numeric), -Death60, -Start_time, -Stop_time), arm::rescale)) %>% 
+  select(Start_time, Stop_time, Death60, Sib_died_count, Sib_died, PROPORTIONALRANK, SST, Area_rain,
+         EstHatchAsynchro12_,
+         # RealMotherAge, ANILLOHEMB, CONFIRMHEMB,
+         # RealFatherAge, ANILLOMACH, CONFIRMMACH,
+         # CoupleExpLocal,
+         # Chl
+         NIDO, WORKYEAR, Status) %>% 
+  # filter(CONFIRMHEMB == "t", !ANILLOHEMB == "SA") %>%
+  # filter(CONFIRMMACH == "t", !ANILLOMACH == "SA") %>%
+  drop_na() %>% 
+  glimpse()
+
+
+SampleSize <- DATA %>% count(NIDO, Sib_died, Death60) %>% count(Death60, Sib_died); SampleSize
+n_Brood_2B <- Insurance_Analysis %>% count(NIDO) %>% count()%>% pull
+n_Brood_2B_rmPArents <- Insurance_Analysis %>% count(NIDO) %>% count()%>% pull
+```
+
+## CoxModel 
+```{r eval=FALSE}
+Insurance_Analysis %<>% mutate(Sib_died = fct_relevel(Sib_died_count1, "0", after = 3L))
+levels(Insurance_Analysis$Sib_died)
+
+Coxa <- coxme(Surv(Start_time, Stop_time, Death60) ~ Sib_died_count +
+               PROPORTIONALRANK + EstHatchAsynchro12_ +
+               # Sib_died_count : PROPORTIONALRANK + # No Sign
+               Sib_died_count : SST +
+               SST + 
+               I(SST^2) +
+               Area_rain +
+               I(Area_rain^2) +
+               # RealFatherAge +
+               # I(RealFatherAge^2) +
+               # CoupleExpLocal +
+               (1|WORKYEAR) + (1|NIDO),
+             data = Insurance_Analysis)
+
+summary(Coxa)
+
+saveRDS(Coxa, file = "FinalIns_Cox_B2_rmChl.rds")
+```
+
+SST has a stronger negatiove effect in chick B survival when chick A didn't died
+
+
+# Sample size 
+```{r}
+Sample_size <- data.frame(
+  Sample_size = c("A2", "A2_rmParents", "B2", "B2_rmPArents"),
+  n = c(n_Brood_2A, n_Brood_2A_rmPArents, n_Brood_2B, n_Brood_2B_rmPArents)
+  )
+write.csv(Sample_size, "SampleSize_2.csv")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Other
+```{r eval=FALSE}
+summary(CoxA)
+summary(CoxB)
+
+
+CoxA<- readRDS("Insurance_Cox_A2_naParents.rds") # remove parents SST:SIB
+CoxA<- readRDS("Insurance_Cox_A2_naParents_Chlint.rds") # remove parents Chl:SIB
+CoxA<- readRDS("Insurance_Cox_A2_naParents_F.rds") # ]Chl:SIB females age
+CoxA<- readRDS("Insurance_Cox_B2_naParents_rm.rds") # remove parent no interaction
+CoxA<- readRDS("Insurance_Cox_A2_rmChl_Final.rds") # remove Chl 
+CoxA<- readRDS("Insurance_Cox_A2_rmChlParents.rds") # remove Chl and parents 
+CoxA<- readRDS("Insurance_Cox_A2.rds"); summary(CoxB)
+CoxB<- readRDS("Insurance_Cox_B2_naParents.rds"); summary(CoxB)
+CoxB<- readRDS("Insurance_Cox_B2_naParents_Chlint.rds"); summary(CoxB)
+CoxB<- readRDS("Insurance_Cox_B2_naParents_F.rds"); summary(CoxB)
+CoxB<- readRDS("Insurance_Cox_B2_naParents_rm.rds"); summary(CoxB)
+CoxB<- readRDS("Insurance_Cox_B2.rds"); summary(CoxB)
+CoxB<- readRDS("Insurance_Cox_B2_Final.rds"); summary(CoxB)
+CoxB<- readRDS("Insurance_Cox_B2_rmChlParents.rds"); summary(CoxB) #Model 2
+
+
+```
